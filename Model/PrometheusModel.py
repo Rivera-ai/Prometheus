@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os 
 import math
 from collections import defaultdict
@@ -465,6 +466,8 @@ class MLPAxialPositions(Module):
     def forward(self, modality_shape: Int['p'] | torch.Size, flatten_dims = False) -> Float['... {self._d}']:
         if isinstance(modality_shape, torch.Size):
             modality_shape = tensor(modality_shape)
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         modality_shape = modality_shape.to(self.device)
 
