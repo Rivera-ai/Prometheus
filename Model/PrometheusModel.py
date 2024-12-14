@@ -46,8 +46,6 @@ try:
 except ImportError:
     flex_attention = None
 
-# types
-
 Scalar = Float['']
 
 ModalitySample = list[Int[''] | Int['_'] | Float['...'] | tuple[int, Float['...']]]
@@ -91,6 +89,11 @@ def default(v, d):
 def identity(t):
     return t
 
+def always(val):
+    def inner(*args, **kwargs):
+        return val
+    return inner
+
 def first(it):
     return it[0]
 
@@ -114,6 +117,15 @@ def add_temp_batch_dim(fn: Callable):
         out = rearrange(out, '1 ... -> ...')
         return out
     return inner
+
+def pack_with_inverse(t, pattern):
+    packed, packed_shape = pack(t, pattern)
+
+    def inverse(out, inv_pattern = None):
+        inv_pattern = default(inv_pattern, pattern)
+        return unpack(out, packed_shape, inv_pattern)
+
+    return packed, inverse
 
 def pack_one_with_inverse(t, pattern):
     packed, packed_shape = pack([t], pattern)
@@ -167,6 +179,28 @@ def default_modality_length_to_time_fn(num_modalities: Int['b']) -> Float['b m']
     return einx.where('b m, , b -> b m', prev_decoded_modality, 0.5, curr_modality_rand_time)
 
 # pretty print
+
+def concat_contiguous_text(
+    modality_sample: ModalitySample
+) -> ModalitySample:
+    """ within a modality sample, any two tensors of type int / long will be concatted together if next to each other, so all text is followed by a modality, and all modality followed by text """
+
+    output = []
+
+    for modality in modality_sample:
+        if (
+            len(output) > 0 and
+            is_tensor(output[-1]) and is_tensor(modality) and
+            output[-1].dtype == modality.dtype and
+            modality.dtype in (torch.int, torch.long)
+        ):
+            packed_text, _ = pack((output[-1], modality), '*')
+            output[-1] = packed_text
+
+        else:
+            output.append(modality)
+
+    return output
 
 def print_modality_sample(
     modality_sample: ModalitySample
@@ -440,14 +474,27 @@ def naive_attn_mask(
 
     return is_causal | is_modality.any(dim = 1)
 
+# sampling related functions
+
+# min_p for text
+# https://arxiv.org/abs/2407.01082
+
 def min_p_filter(logits, min_p = 0.1):
     probs = logits.softmax(dim = -1)
     max_probs = probs.amax(dim = -1, keepdim = True)
     limit = min_p * max_probs
     return torch.where(probs < limit, float('-inf'), logits)
 
+# MLP parameterized N-dimensional positions
+
 class MLPAxialPositions(Module):
-    def __init__(self, *, num_dimensions, dim, expand_factor = 2):
+    def __init__(
+        self,
+        *,
+        num_dimensions, # 2 for images, 3 for video, etc etc
+        dim,
+        expand_factor = 2.
+    ):
         super().__init__()
         self.num_dimensions = num_dimensions
         dim_hidden = int(dim * expand_factor)
@@ -460,29 +507,40 @@ class MLPAxialPositions(Module):
             nn.Linear(dim_hidden, dim)
         )
 
-        self._dim = dim
+        # tensor typing
+
+        self._d = dim
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
     @typecheck
-    def forward(self, modality_shape: Int['p'] | torch.Size, flatten_dims = False) -> Float['... {self._d}']:
+    def forward(
+        self,
+        modality_shape: Int['p'] | torch.Size,
+        flatten_dims = False
+    ) -> Float['... {self._d}']:
+
         if isinstance(modality_shape, torch.Size):
             modality_shape = tensor(modality_shape)
-        
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
         modality_shape = modality_shape.to(self.device)
 
         assert len(modality_shape) == self.num_dimensions
         dimensions = modality_shape.tolist()
 
-        grid = torch.meshgrid([torch.arange(dim_len, device=self.device) for dim_len in dimensions], indexing='ij')
-        axial_positions = stack(grid, dim=-1)
+        grid = torch.meshgrid([torch.arange(dim_len, device = self.device) for dim_len in dimensions], indexing = 'ij')
+        axial_positions = stack(grid, dim = -1)
 
         pos_emb = self.mlp(axial_positions.float())
 
         if flatten_dims:
             pos_emb = rearrange(pos_emb, '... d -> (...) d')
-        
+
         return pos_emb
+
+# random fourier embedding
 
 class RandomFourierEmbed(Module):
     def __init__(self, dim):
@@ -503,6 +561,9 @@ class RandomFourierEmbed(Module):
         freqs = einx.multiply('... i, j -> ... i j', times, self.weights) * 2 * torch.pi
         fourier_embed, _ = pack((times, freqs.sin(), freqs.cos()), 'b n *')
         return fourier_embed
+
+# adaptive layernorm and ada-ln zero rolled into one wrapper
+# from DiT paper and sota for time conditioning for now
 
 class AdaptiveWrapper(Module):
     @beartype
@@ -680,6 +741,8 @@ class Attention(Module):
         softcap_value = 50.,
         use_flex_attn = False,
         gate_values = True,
+        laser = False,
+        laser_softclamp_value = 15.,
         learned_value_residual_mix = False
     ):
         super().__init__()
@@ -698,7 +761,7 @@ class Attention(Module):
             nn.Linear(dim, heads),
             nn.Sigmoid(),
             Rearrange('b n h -> b h n 1') # add head dimension
-        ) if learned_value_residual_mix else (lambda _: 0.5)
+        ) if learned_value_residual_mix else always(0.5)
 
         self.to_gates = nn.Sequential(
             nn.Linear(dim, heads, bias = False),
@@ -706,6 +769,9 @@ class Attention(Module):
         ) if gate_values else None
 
         self.softcap_value = softcap_value
+
+        self.laser = laser
+        self.laser_softclamp_value = laser_softclamp_value
 
         self.dropout = nn.Dropout(dropout)
 
@@ -768,6 +834,12 @@ class Attention(Module):
         if exists(rotary_emb):
             q, k = tuple(apply_rotary_emb(rotary_emb, t, freqs_seq_dim = -2) for t in (q, k))
 
+        # laser attention
+
+        if self.laser:
+            v = softclamp(v, self.laser_softclamp_value)
+            v = v.exp()
+
         # whether to use flex attention or not
 
         if should_use_flex_attn:
@@ -802,6 +874,11 @@ class Attention(Module):
 
             out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
 
+        # laser attention
+
+        if self.laser:
+            out = log(out)
+
         # maybe gate values
 
         if exists(self.to_gates):
@@ -832,6 +909,7 @@ class Transformer(Module):
         ff_expansion_factor = 4,
         attn_kwargs: dict = dict(),
         ff_kwargs: dict = dict(),
+        attn_laser = False,
         unet_skips = True,
         use_flex_attn = False
     ):
@@ -856,7 +934,7 @@ class Transformer(Module):
 
             skip_proj = Linear(dim * 2, dim, bias = False) if is_latter_half and unet_skips else None
 
-            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, learned_value_residual_mix = not is_first, **attn_kwargs)
+            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, learned_value_residual_mix = not is_first, laser = attn_laser, **attn_kwargs)
 
             ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
 
@@ -1017,6 +1095,7 @@ class Prometheus(Module):
         self,
         *,
         num_text_tokens,
+        num_register_tokens = 16,
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent: bool | tuple[bool, ...] = False,
@@ -1200,6 +1279,11 @@ class Prometheus(Module):
         self.latent_to_model_projs = ModuleList(latent_to_model_projs)
         self.model_to_latent_projs = ModuleList(model_to_latent_projs)
 
+        # maybe register tokens (used in hymba, renamed from "meta" to register as "meta" was reserved from above already for the modality meta tag)
+
+        self.register_tokens = nn.Parameter(torch.zeros(num_register_tokens, dim))
+        nn.init.normal_(self.register_tokens, std = 0.02)
+
         # relative positions
 
         self.rotary_emb = RotaryEmbedding(transformer.dim_head)
@@ -1289,6 +1373,19 @@ class Prometheus(Module):
     def get_all_modality_info(self) -> list[ModalityInfo]:
         return [self.get_modality_info(i) for i in range(self.num_modalities)]
 
+    def get_modality_shape(
+        self,
+        modality: Float['...'],
+        modality_type: int | None  = None
+    ) -> tuple[int, ...]:
+
+        mod = self.get_modality_info(modality_type)
+
+        if mod.channel_first_latent:
+            modality = rearrange(modality, 'c ... -> ... c')
+
+        return tuple(modality.shape[:-1])
+
     def parameters_without_encoder_decoder(self):
         return (
             set(self.parameters()) -
@@ -1326,7 +1423,7 @@ class Prometheus(Module):
     @typecheck
     def sample(
         self,
-        prompt: ModalitySample | None = None,
+        prompt: ModalitySample | Tensor | tuple[int, Float['...']] | None = None,
         max_length = 2048,
         text_temperature = 1.5,
         text_min_p = 0.1,
@@ -1339,7 +1436,42 @@ class Prometheus(Module):
 
         device = self.device
 
+        # take care of prompt being a raw tensor, either text or raw modality (image, video, actions, latents, etc)
+
+        if is_tensor(prompt) and prompt.dtype == torch.float: # is modality with type 0 implicit
+            prompt = (0, prompt)
+
+        if is_tensor(prompt) and prompt.dtype in (torch.int, torch.long): # is text only prompt
+            prompt = [prompt]
+
+        elif isinstance(prompt, tuple):
+            modality_type, modality = prompt
+
+            mod = self.get_modality_info(modality_type)
+
+            if exists(mod.encoder):
+                with torch.no_grad():
+                    mod.encoder.eval()
+                    modality = self.maybe_add_temp_batch_dim(mod.encoder)(modality).detach()
+
+            modality_shape_tuple = self.get_modality_shape(modality, modality_type)
+            modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
+            modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
+
+            prompt = [
+                tensor([self.meta_id]),
+                modality_meta_info,
+                tensor([mod.som_id]),
+                (modality_type, modality),
+                tensor([mod.eom_id]),
+            ]
+
+        # sos
+
         init_text_seq = tensor([self.sos_id], device = device)
+
+        # just take care of prompt being zero dimensions
+
         modality_sample = [init_text_seq, *default(prompt, [])]
 
         # take care of moving to device
@@ -1347,8 +1479,9 @@ class Prometheus(Module):
         modality_sample = tree_map_tensor(modality_sample, lambda t: t.to(device))
         modality_sample = tree_map_tensor(modality_sample, lambda t: rearrange(t, '-> 1') if t.ndim == 0 else t)
 
+        modality_sample = concat_contiguous_text(modality_sample)
+
         *_, last_modality_sample = modality_sample
-        assert last_modality_sample.dtype in (torch.int, torch.long), 'prompt must be text tokens'
 
         curr_length = 0
         curr_modality_id = None
@@ -2245,6 +2378,7 @@ class Prometheus(Module):
         if modality_positions.numel() == 0:
             modality_positions = F.pad(modality_positions, (0, 0, 0, 1))
 
+
         # sort the modalities tensor and sanitize, readying for noising of modalities
 
         modality_positions, sorted_indices = order_modality_positions_by_seq_offset(modality_positions)
@@ -2267,6 +2401,18 @@ class Prometheus(Module):
         # intersperse the modalities with the text for the joint transformer + flow system
 
         tokens = einx.where('b n, b n d, b n d', is_any_modality, modality_tokens, text_tokens)
+
+        # handle maybe meta / register tokens
+
+        register_tokens = repeat(self.register_tokens, '... -> b ...', b = batch)
+
+        num_register_tokens = register_tokens.shape[-2]
+        seq_len += num_register_tokens
+
+        tokens, unpack_register_tokens = pack_with_inverse((register_tokens, tokens), 'b * d')
+        modality_positions[..., 1] += num_register_tokens
+
+        is_modalities = F.pad(is_modalities, (num_register_tokens, 0), value = False)
 
         # derive rotary positions
 
@@ -2307,6 +2453,11 @@ class Prometheus(Module):
             decode_length = decode_length,
             return_kv_cache = True
         )
+
+        if not exists(decode_length):
+            # remove register tokens
+
+            _, embed = unpack_register_tokens(embed)
 
         # early return for embedding for decoding modality
 
