@@ -1,1 +1,1 @@
-## Prometheus is based on the implementation: [lucidrains/transfusion-pytorch](https://github.com/lucidrains/transfusion-pytorch) and paper: [Transfusion](https://www.arxiv.org/abs/2408.11039)
+## Prometheus is based on the paper: [Transfusion](https://www.arxiv.org/abs/2408.11039)
