@@ -2,7 +2,7 @@ from setuptools import setup
 import setuptools
 
 setup(
-    name="Prometheus",
+    name="PrometheusModel",
     version="0.1.1",
     description="Prometheus is a native multimodal model and Prometheus is based on the paper: Transfusion",
     author="Rivera.ai/Fredy Rivera",
