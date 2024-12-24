@@ -1,0 +1,23 @@
+Metadata-Version: 2.1
+Name: PrometheusCore
+Version: 0.1.1
+Summary: Prometheus is a native multimodal model and Prometheus is based on the paper: Transfusion
+Author: Rivera.ai/Fredy Rivera
+Author-email: riveraaai200678@gmail.com
+Requires-Python: >=3.8
+License-File: LICENSE.txt
+Requires-Dist: torch
+Requires-Dist: torchvision
+Requires-Dist: numpy
+Requires-Dist: pillow
+Requires-Dist: av
+Requires-Dist: tqdm
+Requires-Dist: torchmetrics
+Requires-Dist: einops
+Requires-Dist: einx
+Requires-Dist: ema_pytorch
+Requires-Dist: rotary_embedding_torch
+Requires-Dist: tqdm
+Requires-Dist: jaxtyping
+Requires-Dist: beartype
+Requires-Dist: loguru

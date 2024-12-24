@@ -1,14 +1,12 @@
-from setuptools import setup
-import setuptools
+from setuptools import setup, find_packages
 
 setup(
-    name="PrometheusModel",
+    name="PrometheusCore",
     version="0.1.1",
     description="Prometheus is a native multimodal model and Prometheus is based on the paper: Transfusion",
     author="Rivera.ai/Fredy Rivera",
     author_email="riveraaai200678@gmail.com",
-    package_dir={"": "Model"},
-    packages=setuptools.find_packages(where="Model"),
+    packages=find_packages(),
     install_requires=[
         "torch",
         "torchvision",

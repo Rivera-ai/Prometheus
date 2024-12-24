@@ -1,0 +1,15 @@
+torch
+torchvision
+numpy
+pillow
+av
+tqdm
+torchmetrics
+einops
+einx
+ema_pytorch
+rotary_embedding_torch
+tqdm
+jaxtyping
+beartype
+loguru
