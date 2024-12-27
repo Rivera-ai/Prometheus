@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 from einops.layers.torch import Rearrange
 from torch.nn import functional as F
@@ -25,11 +24,8 @@ class ResidualBlock(nn.Module):
         return F.relu(out)
 
 class Normalize(nn.Module):
-    def __init__(self):
-        super().__init__()
-    
     def forward(self, x):
-        return x / torch.norm(x, dim=-1, keepdim=True)
+        return F.normalize(x, dim = -1)
 
 class EncoderV1(nn.Module):
     def __init__(self, dim_latent, device='cuda'):

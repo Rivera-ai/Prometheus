@@ -60,9 +60,7 @@ def cycle(iter_dl):
         for batch in iter_dl:
             yield batch
 
-class Normalize(Module):
-    def forward(self, x):
-        return F.normalize(x, dim = -1)
+
 
 class Flickr30kDataset(Dataset):
     def __init__(self, csv_path, images_dir):
