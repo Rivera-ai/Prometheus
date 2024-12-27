@@ -1,6 +1,6 @@
 [project]
 name = "PrometheusCore"
-version = "0.1.1"
+version = "0.2.0"
 description = "Prometheus is a native multimodal model and Prometheus is based on the paper: Transfusion"
 authors = [
     { name = "Rivera.ai/Fredy Rivera", email = "riveraaai200678@gmail.com" }
