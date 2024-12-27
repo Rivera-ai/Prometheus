@@ -13,8 +13,6 @@ from PIL import Image
 import pandas as pd
 import ast
 from PrometheusCore import Prometheus, print_modality_sample, EncoderV1, DecoderV1
-import numpy as np
-from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoTokenizer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -44,13 +42,10 @@ def collate_fn(batch):
     # Separar las captions y las imágenes
     captions, images = zip(*batch)
 
-    # Aplicar padding a las captions
-    padded_captions = pad_sequence(captions, batch_first=True, padding_value=0)
-
     # Convertir imágenes en un solo tensor (PyTorch lo maneja bien si tienen tamaño uniforme)
     images = torch.stack(images)
 
-    return padded_captions, images
+    return captions, images
 
 def load_checkpoint(model, checkpoint_path):
     checkpoint = torch.load(checkpoint_path)
