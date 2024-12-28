@@ -6,7 +6,7 @@ import torch
 from torch.optim import AdamW
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
-from Model.PrometheusModel import Prometheus
+from PrometheusCore import Prometheus
 from datasets import load_dataset
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

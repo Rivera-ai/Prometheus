@@ -12,7 +12,7 @@ import torchvision
 import torchvision.transforms as T
 from torchvision.utils import save_image
 from tqdm import tqdm
-from Model.PrometheusModel import Prometheus, print_modality_sample
+from PrometheusCore import Prometheus, print_modality_sample
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

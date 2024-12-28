@@ -4,7 +4,7 @@ from torch import tensor
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as T
-from Model.PrometheusModel import Prometheus
+from PrometheusCore import Prometheus
 import numpy as np
 import torch.nn as nn
 from torch.nn import Module

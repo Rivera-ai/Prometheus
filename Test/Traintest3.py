@@ -13,7 +13,7 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 from datasets import load_dataset
 import numpy as np
-from Model.PrometheusModel import Prometheus, print_modality_sample
+from PrometheusCore import Prometheus, print_modality_sample
 
 # Configuración general
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

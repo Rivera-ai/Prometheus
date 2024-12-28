@@ -1,7 +1,7 @@
 import torch
 from pathlib import Path
 from torchvision.utils import save_image
-from Model.PrometheusModel import Prometheus
+from PrometheusCore import Prometheus
 import torch.nn as nn
 from einops import rearrange
 from einops.layers.torch import Rearrange

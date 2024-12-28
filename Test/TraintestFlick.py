@@ -16,7 +16,7 @@ from tqdm import tqdm
 from PIL import Image
 import pandas as pd
 import ast
-from Model.PrometheusModel import Prometheus, print_modality_sample
+from PrometheusCore import Prometheus, print_modality_sample
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 
