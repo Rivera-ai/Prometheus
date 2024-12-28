@@ -2,7 +2,6 @@ from shutil import rmtree
 from pathlib import Path
 import random
 import torch
-from torch.nn import Module
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
