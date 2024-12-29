@@ -7,16 +7,13 @@ from torch.nn import Module
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from einops import rearrange
-from einops.layers.torch import Rearrange
-import torchvision
 import torchvision.transforms as T
 from torchvision.utils import save_image
 from tqdm import tqdm
 from PIL import Image
 import pandas as pd
 import ast
-from PrometheusCore import Prometheus, print_modality_sample
+from PrometheusCore import Prometheus, print_modality_sample, EncoderV1, DecoderV1
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 
@@ -146,33 +143,10 @@ class ResidualBlock(nn.Module):
         out += self.shortcut(x)
         return F.relu(out)
 
-encoder = nn.Sequential(
-    nn.Conv2d(3, 64, 7, stride=2, padding=3),  # 128x128
-    nn.BatchNorm2d(64),
-    nn.ReLU(),
-    nn.MaxPool2d(3, stride=2, padding=1),      # 64x64
-    ResidualBlock(64, 128, stride=2),          # 32x32
-    ResidualBlock(128, 256, stride=2),         # 16x16
-    nn.Conv2d(256, dim_latent, 1),            # 16x16xdim_latent
-    Rearrange('b d h w -> b h w d'),          # Reorganiza para tener dim_latent al final
-    Normalize()
-).to(device)
+encoder = EncoderV1(dim_latent=dim_latent)
 
 # Decoder modificado para manejar las dimensiones correctamente
-decoder = nn.Sequential(
-    Rearrange('b h w d -> b d h w'),          # Volver a poner canales primero
-    nn.ConvTranspose2d(dim_latent, 256, 4, 2, 1),  # 32x32
-    nn.BatchNorm2d(256),
-    nn.ReLU(),
-    nn.ConvTranspose2d(256, 128, 4, 2, 1),    # 64x64
-    nn.BatchNorm2d(128),
-    nn.ReLU(),
-    nn.ConvTranspose2d(128, 64, 4, 2, 1),     # 128x128
-    nn.BatchNorm2d(64),
-    nn.ReLU(),
-    nn.ConvTranspose2d(64, 3, 4, 2, 1),       # 256x256
-    nn.Tanh()
-).to(device)
+decoder = DecoderV1(dim_latent=dim_latent)
 
 # Create dataset and dataloaders
 dataset = Flickr30kDataset(csv_path="/teamspace/studios/this_studio/flickr30k/flickr_annotations_30k.csv", images_dir="/teamspace/studios/this_studio/flickr30k/flickr30k-images/")
@@ -180,7 +154,7 @@ dataset = Flickr30kDataset(csv_path="/teamspace/studios/this_studio/flickr30k/fl
 # Training parameters
 batch_size = 8  # Reduced batch size due to larger images
 accum_steps = 4
-autoencoder_train_steps = 150000  # Increased steps for more complex dataset
+autoencoder_train_steps = 500  # Increased steps for more complex dataset
 learning_rate = 1e-4  # Adjusted learning rate
 
 autoencoder_optimizer = AdamW([*encoder.parameters(), *decoder.parameters()], lr=learning_rate)
@@ -270,7 +244,7 @@ with tqdm(total=transfusion_train_steps) as pbar:
         pbar.set_description(f'loss: {loss.item():.3f}')
         pbar.update()
 
-        if divisible_by(step, 500):
+        if divisible_by(step, 5):
             save_checkpoint(model=model, epoch=step, loss=loss.item())
             one_multimodal_sample = model.sample(max_length=256)  # Increased for longer captions
 
