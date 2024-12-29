@@ -23,6 +23,7 @@ dependencies = [
     "beartype",
     "loguru",
     "torchdiffeq",
+    "hyper_connections",
 ]
 
 [build-system]
