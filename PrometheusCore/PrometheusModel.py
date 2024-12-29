@@ -1,41 +1,73 @@
 from __future__ import annotations
-import os 
+
+"""
+global ein notation
+
+b - batch
+t - one modality type
+m - separate modality instance
+n - sequence
+d - dimension
+l - logits (text)
+i, j - sequence (row, col)
+p - positions
+s - residual streams
+"""
+
+import os
 import math
 from collections import defaultdict
+
+from random import randrange
+from itertools import count
 from functools import partial, wraps, cache
 from typing import NamedTuple, Callable, Literal
-import torch 
+
+import torch
 import torch.nn.functional as F
 from torch import nn, Tensor, tensor, is_tensor, cat, stack
 from torch.nn import Module, ModuleList, Linear
+
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
+
 from torchdiffeq import odeint
+
 import einx
 from einops.layers.torch import Rearrange
 from einops import rearrange, repeat, reduce, einsum, pack, unpack
+
 from ema_pytorch import EMA
+
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
+
+from hyper_connections import HyperConnections
+
 from tqdm import tqdm
-import jaxtyping
-from jaxtyping import jaxtyped
-from beartype import beartype
-from beartype.door import is_bearable
 from loguru import logger
 
 pad_sequence = partial(pad_sequence, batch_first = True)
 
+# tensor typing
+
+import jaxtyping
+from jaxtyping import jaxtyped
+from beartype import beartype
+from beartype.door import is_bearable
+
 class TorchTyping:
     def __init__(self, abstract_dtype):
         self.abstract_dtype = abstract_dtype
-    
+
     def __getitem__(self, shapes: str):
         return self.abstract_dtype[Tensor, shapes]
 
 Float = TorchTyping(jaxtyping.Float)
-Int = TorchTyping(jaxtyping.Int)
-Bool = TorchTyping(jaxtyping.Bool)
+Int   = TorchTyping(jaxtyping.Int)
+Bool  = TorchTyping(jaxtyping.Bool)
+
+# maybe flex attention
 
 try:
     from torch.nn.attention.flex_attention import flex_attention, create_block_mask
@@ -45,6 +77,8 @@ try:
 
 except ImportError:
     flex_attention = None
+
+# types
 
 Scalar = Float['']
 
@@ -911,7 +945,8 @@ class Transformer(Module):
         ff_kwargs: dict = dict(),
         attn_laser = False,
         unet_skips = True,
-        use_flex_attn = False
+        use_flex_attn = False,
+        num_residual_streams = 1
     ):
         super().__init__()
         self.use_flex_attn = use_flex_attn
@@ -924,6 +959,18 @@ class Transformer(Module):
             Linear(dim + 1, dim * 4),
             nn.SiLU()
         )
+
+        # hyper connections
+
+        assert num_residual_streams > 0
+        is_hyper_connection = num_residual_streams > 1
+        self.num_residual_streams = num_residual_streams
+
+        counter = count()
+
+        init_residual_fn, self.expand_stream, self.reduce_stream = HyperConnections.get_init_and_expand_reduce_stream_functions(num_residual_streams, disable = num_residual_streams == 1)
+
+        # layers
 
         layers = ModuleList([])
 
@@ -941,7 +988,10 @@ class Transformer(Module):
             attn = AdaptiveWrapper(attn, dim = dim, dim_cond = dim * 4)
             ff = AdaptiveWrapper(ff, dim = dim, dim_cond = dim * 4)
 
-            layers.append(ModuleList([skip_proj, attn, ff]))
+            attn_residual = init_residual_fn(dim = dim, layer_index = next(counter))
+            ff_residual = init_residual_fn(dim = dim, layer_index = next(counter))
+
+            layers.append(ModuleList([skip_proj, attn, attn_residual, ff, ff_residual]))
 
         self.layers = layers
         self.norm = RMSNorm(dim)
@@ -1031,6 +1081,10 @@ class Transformer(Module):
         cache = default(cache, (None,))
         iter_cache = iter(cache)
 
+        # expand input into multiple residual streams for maybe hyper connection
+
+        x = self.expand_stream(x)
+
         # transformer layers as usual, using mask from above
 
         skips = []
@@ -1040,7 +1094,7 @@ class Transformer(Module):
 
         depth = len(self.layers)
 
-        for ind, (skip_proj, attn, ff) in enumerate(self.layers):
+        for ind, (skip_proj, attn, attn_residual, ff, ff_residual) in enumerate(self.layers):
             layer = ind + 1
 
             # skip connection
@@ -1060,6 +1114,8 @@ class Transformer(Module):
 
             # attention and feedforward
 
+            x, add_attn_residual = attn_residual(x)
+
             (attn_out, attn_values), kv_cache = attn(
                 x,
                 rotary_emb = rotary_emb,
@@ -1075,8 +1131,17 @@ class Transformer(Module):
 
             new_cache.append(kv_cache)
 
-            x = attn_out + x
-            x = ff(x, **adaptive_kwargs) + x
+            x = add_attn_residual(attn_out)
+
+            x, add_ff_residual = ff_residual(x)
+
+            ff_out = ff(x, **adaptive_kwargs)
+
+            x = add_ff_residual(ff_out)
+
+        # reduce multiple residual streams for maybe hyper connection
+
+        x = self.reduce_stream(x)
 
         assert len(skips) == 0
 

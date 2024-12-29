@@ -13,6 +13,7 @@ import pandas as pd
 import ast
 from PrometheusCore import Prometheus, print_modality_sample, EncoderV1, DecoderV1
 from transformers import AutoTokenizer
+from torch import tensor
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -25,13 +26,13 @@ results_folder.mkdir(exist_ok=True, parents=True)
 def save_checkpoint(model, epoch, loss, checkpoint_dir='checkpoints'):
     checkpoint_path = Path(checkpoint_dir)
     checkpoint_path.mkdir(exist_ok=True, parents=True)
-    
+
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'loss': loss
     }
-    
+
     checkpoint_file = checkpoint_path / f'checkpoint_epoch_{epoch}.pt'
     torch.save(checkpoint, checkpoint_file)
     latest_checkpoint = checkpoint_path / 'checkpoint_latest.pt'
@@ -62,25 +63,26 @@ def cycle(iter_dl):
 
 
 class Flickr30kDataset(Dataset):
-    def __init__(self, csv_path, images_dir):
+    def __init__(self, csv_path, images_dir, autoencodertrain=False):
         """
         Args:
             csv_path: Ruta al archivo CSV con los datos de Flickr30k
             images_dir: Directorio que contiene las imágenes
         """
         self.images_dir = Path(images_dir)
-        
+
         # Cargar y procesar el CSV
         self.df = pd.read_csv(csv_path)
         # Convertir las strings de lista a listas reales
         self.df['raw'] = self.df['raw'].apply(ast.literal_eval)
-        
+
         # Filtrar por split=='train' si es necesario
         self.df = self.df[self.df['split'] == 'train'].reset_index(drop=True)
         self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.max_length = 1024
-        
+        self.autoencodertrain = autoencodertrain
+
         self.transform = T.Compose([
             T.Resize(286),  # Resize más grande para crop
             T.RandomCrop(256),  # Random crop para data augmentation
@@ -95,12 +97,12 @@ class Flickr30kDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        
+
         # Cargar imagen
         image_path = self.images_dir / row['filename']
         image = Image.open(image_path).convert('RGB')
         image_tensor = self.transform(image)
-        
+
         # Seleccionar una caption aleatoria de las 5 disponibles
         caption = random.choice(row['raw'])
         text_encoded = self.tokenizer.encode(
@@ -111,8 +113,13 @@ class Flickr30kDataset(Dataset):
             return_tensors='pt'
         )
         text_tensor = text_encoded.squeeze(0)
+
+        if self.autoencodertrain == False:
+
+            return text_tensor, (0, image_tensor)
         
-        return text_tensor, image_tensor
+        else: 
+            return text_tensor, image_tensor
 
 # Larger encoder for 256x256 images
 dim_latent = 256  # Increased latent dimension for more complex images
@@ -121,12 +128,12 @@ encoder = EncoderV1(dim_latent=dim_latent)
 decoder = DecoderV1(dim_latent=dim_latent)
 
 # Create dataset and dataloaders
-dataset = Flickr30kDataset(csv_path="/teamspace/studios/this_studio/flickr30k/flickr_annotations_30k.csv", images_dir="/teamspace/studios/this_studio/flickr30k/flickr30k-images/")
+dataset = Flickr30kDataset(csv_path="/teamspace/studios/this_studio/flickr30k/flickr_annotations_30k.csv", images_dir="/teamspace/studios/this_studio/flickr30k/flickr30k-images/", autoencodertrain=True)
 
 # Training parameters
 batch_size = 8  # Reduced batch size due to larger images
 accum_steps = 4
-autoencoder_train_steps = 150000  # Increased steps for more complex dataset
+autoencoder_train_steps = 1500  # Increased steps for more complex dataset
 learning_rate = 1e-4  # Adjusted learning rate
 
 autoencoder_optimizer = AdamW([*encoder.parameters(), *decoder.parameters()], lr=learning_rate)
@@ -135,11 +142,14 @@ autoencoder_iter_dl = cycle(autoencoder_dataloader)
 
 print('training autoencoder')
 
+autoencoder_checkpoint_dir = Path('./autoencoder_checkpoints')
+autoencoder_checkpoint_dir.mkdir(exist_ok=True, parents=True)
+
 with tqdm(total=autoencoder_train_steps) as pbar:
     for step in range(autoencoder_train_steps):
         total_loss = 0
         autoencoder_optimizer.zero_grad()
-        
+
         for _ in range(accum_steps):
             _, images = next(autoencoder_iter_dl)
             images = images.to(device)
@@ -152,12 +162,12 @@ with tqdm(total=autoencoder_train_steps) as pbar:
             loss = F.mse_loss(images, reconstructed)
             loss = loss / accum_steps  # Normalizar la pérdida
             total_loss += loss.item()
-            
+
             loss.backward()
 
         # Clip gradients
         torch.nn.utils.clip_grad_norm_([*encoder.parameters(), *decoder.parameters()], 1.0)
-        
+
         autoencoder_optimizer.step()
         autoencoder_optimizer.zero_grad()
 
@@ -172,6 +182,17 @@ with tqdm(total=autoencoder_train_steps) as pbar:
                     str(results_folder / f'reconstruction_{step}.png'),
                     normalize=True
                 )
+
+                checkpoint = {
+                    'step': step,
+                    'encoder_state_dict': encoder.state_dict(),
+                    'decoder_state_dict': decoder.state_dict(),
+                    'optimizer_state_dict': autoencoder_optimizer.state_dict(),
+                    'loss': total_loss
+                }
+
+                torch.save(checkpoint, autoencoder_checkpoint_dir / f'autoencoder_checkpoint_step_{step}.pt')
+                torch.save(checkpoint, autoencoder_checkpoint_dir / 'autoencoder_checkpoint_latest.pt')
 
 # Initialize Prometheus with new parameters
 model = Prometheus(
@@ -190,7 +211,9 @@ model = Prometheus(
     )
 ).to(device)
 
-dataloader = model.create_dataloader(dataset, batch_size=batch_size, shuffle=True)
+dataset = Flickr30kDataset(csv_path="/teamspace/studios/this_studio/flickr30k/flickr_annotations_30k.csv", images_dir="/teamspace/studios/this_studio/flickr30k/flickr30k-images/", autoencodertrain=False)
+
+dataloader = model.create_dataloader(dataset, batch_size=1, shuffle=True)
 iter_dl = cycle(dataloader)
 
 optimizer = AdamW(model.parameters_without_encoder_decoder(), lr=learning_rate)
@@ -213,23 +236,32 @@ with tqdm(total=transfusion_train_steps) as pbar:
         optimizer.step()
         optimizer.zero_grad()
 
+
         pbar.set_description(f'loss: {loss.item():.3f}')
         pbar.update()
 
-        if divisible_by(step, 500):
+        if divisible_by(step, 5):
             save_checkpoint(model=model, epoch=step, loss=loss.item())
-            one_multimodal_sample = model.sample(max_length=1024)  # Increased for longer captions
+            one_multimodal_sample = model.sample(
+                max_length=256,
+                text_temperature=1.0,  # Ajustar temperatura 
+                modality_steps=32,     # Aumentar pasos de sampleo
+                fixed_modality_shape=(16, 16)  # Especificar el tamaño explícitamente
+                )
+
+            #sample_image = model.generate_modality_only(batch_size=1, modality_type=0,  modality_steps=16)
+            #print(f"Verify shape image: {sample_image.shape}")
 
             print_modality_sample(one_multimodal_sample)
 
             if len(one_multimodal_sample) < 2:
                 continue
 
-            caption, image, *_ = one_multimodal_sample
+            maybe_label, maybe_image, *_ = one_multimodal_sample
 
-            filename = f'{step}.png'
+            filename = f'{step}.{maybe_label[1].item()}.png'
             save_image(
-                image[1].cpu().clamp(min=-1., max=1.),
+                maybe_image[1].cpu().clamp(min=-1., max=1.),  # Mantenemos el rango -1 a 1 por ser Flickr
                 str(results_folder / filename),
-                normalize=True
+                normalize=True  # Mantenemos normalize=True por ser Flickr
             )
